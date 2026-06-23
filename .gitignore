@@ -4,6 +4,7 @@ __pycache__/
 
 # Credentials and browser/session state
 .env
+.env.pressreader
 .env.*
 !.env.pressreader.example
 *.cookies.txt
