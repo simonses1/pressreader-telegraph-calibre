@@ -1,0 +1,22 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Credentials and browser/session state
+.env
+.env.*
+!.env.pressreader.example
+*.cookies.txt
+
+# Generated Calibre/PressReader outputs
+outputs/
+*.epub
+*.mobi
+*.azw3
+*.pdf
+manifest.json
+articles/
+debug/
+
+# Local browser profiles
+.pressreader-*/

@@ -1,0 +1,145 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+'''
+PressReader TextView manifest recipe.
+
+Use this with a manifest produced by scripts/pressreader_textview_prefetch.py.
+The helper owns the browser session and full-text extraction; this recipe turns
+the resulting local article HTML files into a Calibre book.
+'''
+
+import json
+import os
+from collections import OrderedDict
+from pathlib import Path
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+class PressReaderTextView(BasicNewsRecipe):
+    title = 'PressReader TextView'
+    __author__ = 'Simon Stace'
+    description = 'Build a Calibre issue from a PressReader TextView prefetch manifest.'
+    language = 'en_GB'
+    publisher = 'PressReader'
+    category = 'newspaper, pressreader'
+    encoding = 'utf-8'
+    needs_subscription = 'optional'
+    remove_javascript = True
+    remove_empty_feeds = True
+    ignore_duplicate_articles = {'url'}
+    articles_are_obfuscated = True
+    simultaneous_downloads = 1
+    timeout = 60
+
+    recipe_specific_options = {
+        'manifest': {
+            'short': 'PressReader prefetch manifest',
+            'long': 'Path to manifest.json produced by scripts/pressreader_textview_prefetch.py.',
+        },
+        'prefetched_manifest': {
+            'short': 'Alias for manifest',
+            'long': 'Path to manifest.json produced by scripts/pressreader_textview_prefetch.py.',
+        },
+    }
+
+    conversion_options = {
+        'comment': description,
+        'tags': category,
+        'publisher': publisher,
+        'language': language,
+    }
+
+    extra_css = '''
+        body { font-family: serif; line-height: 1.35; }
+        img { display: block; margin: 1em auto; max-width: 100%; height: auto; }
+        .source, .meta { font-size: small; color: #555; }
+        .subtitle { font-weight: bold; }
+    '''
+
+    def __init__(self, options, log, progress_reporter):
+        self._early_recipe_options = {}
+        self._manifest_base_dir = ''
+        self._prefetched_articles = {}
+        for raw in (getattr(options, 'recipe_specific_option', None) or ()):
+            key, sep, value = raw.partition(':')
+            if sep:
+                self._early_recipe_options[key] = value
+        BasicNewsRecipe.__init__(self, options, log, progress_reporter)
+
+    def _option(self, name):
+        value = self._early_recipe_options.get(name)
+        if value is None and isinstance(self.recipe_specific_options, dict):
+            spec = self.recipe_specific_options.get(name)
+            if isinstance(spec, dict):
+                value = spec.get('default')
+        return value
+
+    def _manifest_path(self):
+        value = self._option('manifest') or self._option('prefetched_manifest')
+        if not value:
+            raise ValueError(
+                'PressReader manifest is required. Run scripts/pressreader_textview_prefetch.py '
+                'first, then pass --recipe-specific-option manifest:/path/to/manifest.json'
+            )
+        path = os.path.expanduser(value)
+        if not os.path.exists(path):
+            raise ValueError(f'PressReader manifest does not exist: {path}')
+        return os.path.abspath(path)
+
+    def _load_manifest(self):
+        manifest_path = self._manifest_path()
+        self._manifest_base_dir = os.path.dirname(manifest_path)
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        articles = manifest.get('articles') if isinstance(manifest, dict) else manifest
+        if not isinstance(articles, list):
+            raise ValueError('PressReader manifest must contain an articles list')
+        if not articles:
+            raise ValueError(f'PressReader manifest contained no articles: {manifest_path}')
+        cover_url = manifest.get('cover_url') or manifest.get('cover') if isinstance(manifest, dict) else ''
+        if cover_url:
+            self.cover_url = cover_url
+            self._prefetched_cover_url = cover_url
+            self.log('Using PressReader cover:', cover_url)
+        self.title = manifest.get('title') or self.title
+        self.publisher = manifest.get('publisher') or self.publisher
+        return articles
+
+    def parse_index(self):
+        articles = self._load_manifest()
+        feeds = OrderedDict()
+        for index, article in enumerate(articles, 1):
+            if not isinstance(article, dict):
+                continue
+            title = (article.get('title') or f'Article {index}').strip()
+            html_path = article.get('html') or ''
+            if html_path and not os.path.isabs(html_path):
+                html_path = os.path.join(self._manifest_base_dir, html_path)
+            if not html_path or not os.path.exists(html_path):
+                raise ValueError(f'PressReader article HTML does not exist for {title}: {html_path}')
+            url = article.get('url') or f'pressreader-prefetched://article/{index}'
+            section = (article.get('section') or 'Articles').strip() or 'Articles'
+            cached = dict(article)
+            cached['html_path'] = html_path
+            self._prefetched_articles[url] = cached
+            feeds.setdefault(section, []).append({'title': title, 'url': url})
+        if not feeds:
+            raise ValueError('PressReader manifest contained no usable articles')
+        self.log('Loaded', sum(len(x) for x in feeds.values()), 'PressReader articles from manifest')
+        return list(feeds.items())
+
+    def get_obfuscated_article(self, url):
+        article = self._prefetched_articles.get(url)
+        if not article:
+            raise ValueError(f'PressReader manifest article was not cached: {url}')
+        html_path = article['html_path']
+        with open(html_path, 'rb') as f:
+            data = f.read()
+        return {
+            'data': data,
+            'url': article.get('base_url') or Path(html_path).resolve().as_uri(),
+        }
+
+    def get_cover_url(self):
+        return getattr(self, '_prefetched_cover_url', None) or getattr(self, 'cover_url', None)
