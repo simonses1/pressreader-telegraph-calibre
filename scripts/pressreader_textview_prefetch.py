@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Maximum articles to export. 0 means no cap.")
     parser.add_argument("--image-scale", type=int, default=200, help="PressReader region image scale. 100 is low-res; 200 is a good Kindle default.")
     parser.add_argument("--cover-width", type=int, default=1000, help="PressReader front-page cover width in pixels.")
+    parser.add_argument("--publication-title", default="", help="Publication title to store in the manifest.")
+    parser.add_argument("--publisher", default="", help="Publisher metadata to store in the manifest.")
+    parser.add_argument("--category", default="", help="Category/tag metadata to store in the manifest.")
+    parser.add_argument("--issue-date", default="", help="Issue date metadata in YYYYMMDD format.")
     parser.add_argument("--debug", action="store_true", help="Keep rendered page HTML, screenshot, and API JSON captures.")
     return parser.parse_args()
 
@@ -216,6 +220,39 @@ def cover_url_from_responses(responses: list[dict], cover_width: int = 1000) -> 
         return ""
     cover_width = max(400, min(2200, int(cover_width or 1000)))
     return f"https://t.prcdn.co/img?file={quote(issue_key, safe='')}&page=1&width={cover_width}&retina=2"
+
+
+def pressreader_url_parts(url: str) -> tuple[str, str]:
+    """Return (publication_path, issue_date) inferred from a PressReader URL."""
+    parsed = urlparse(url or "")
+    path = parsed.path if parsed.scheme else url
+    parts = [part for part in path.strip("/").split("/") if part]
+    if parts and parts[-1].lower() == "textview":
+        parts.pop()
+    issue_date = ""
+    if parts and re.match(r"^\d{8}$", parts[-1]):
+        issue_date = parts.pop()
+    return "/".join(parts), issue_date
+
+
+def title_from_publication_path(publication_path: str) -> str:
+    slug = (publication_path or "").strip("/").split("/")[-1]
+    if not slug:
+        return ""
+    words = re.split(r"[-_\s]+", slug)
+    small_words = {"and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "via"}
+    rendered = []
+    for index, word in enumerate(words):
+        if not word:
+            continue
+        lower = word.lower()
+        if len(word) <= 3 and word.isalpha() and word.isupper():
+            rendered.append(word)
+        elif index and lower in small_words:
+            rendered.append(lower)
+        else:
+            rendered.append(lower.capitalize())
+    return " ".join(rendered)
 
 
 def paragraph_text(paragraph) -> str:
@@ -842,6 +879,8 @@ def export_articles(candidates: list[dict[str, str]], out_dir: Path, source_url:
 def main() -> int:
     args = parse_args()
     load_env_file(args.env_file)
+    if args.issue_date and not re.match(r"^\d{8}$", args.issue_date):
+        raise ValueError(f"--issue-date must be YYYYMMDD, got: {args.issue_date}")
     if args.login_only and not (args.auto_login or args.library_login):
         args.login = True
 
@@ -922,10 +961,16 @@ def main() -> int:
         finally:
             context.close()
 
+    publication_path, inferred_issue_date = pressreader_url_parts(args.url)
+    manifest_title = args.publication_title or title_from_publication_path(publication_path) or "PressReader TextView"
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_url": args.url,
-        "title": "PressReader TextView",
+        "publication_path": publication_path,
+        "issue_date": args.issue_date or inferred_issue_date,
+        "title": manifest_title,
+        "publisher": args.publisher or "PressReader",
+        "category": args.category or "newspaper, pressreader",
         "cover_url": cover_url_from_responses(responses, args.cover_width),
         "requested_count": len(candidates) if "candidates" in locals() else 0,
         "fetched_count": len(articles) if "articles" in locals() else 0,

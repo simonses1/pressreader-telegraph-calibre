@@ -1,21 +1,16 @@
-# PressReader Telegraph Calibre
+# PressReader Calibre Tools
 
-Calibre recipes and a browser-backed prefetch helper for building a Kindle/EPUB edition of **The Daily Telegraph** from PressReader TextView.
+Browser-backed tools for building Calibre/Kindle editions from PressReader TextView publications.
 
-The bundled Telegraph recipe runs the helper automatically:
-
-1. Loads credentials from `.env.pressreader`.
-2. Opens PressReader with Playwright using a persistent Chromium profile.
-3. Signs in through PressReader's **Library or Group** flow.
-4. Fetches the issue TextView article bodies from PressReader's JSON services.
-5. Writes a local manifest and local article HTML files.
-6. Lets Calibre build the final ebook with inline images and a PressReader front-page cover.
+The code is now publication-aware: pass a PressReader publication path, issue URL, or country/slug pair, then either fetch an issue on demand or generate an importable Calibre recipe for repeated use.
 
 ## Files
 
-- `recipes/telegraph_pressreader.recipe` - one-step Calibre recipe for The Daily Telegraph.
-- `recipes/pressreader_textview.recipe` - manifest-only recipe for debugging an already-prefetched issue.
-- `scripts/pressreader_textview_prefetch.py` - Playwright helper that handles PressReader sign-in and export.
+- `scripts/pressreader_publication.py` - CLI for publication/date handling, on-demand pulls, EPUB conversion, and recipe generation.
+- `recipes/pressreader_publication.recipe` - generic Calibre recipe for any PressReader publication.
+- `scripts/pressreader_textview_prefetch.py` - Playwright helper that handles PressReader sign-in and TextView export.
+- `recipes/pressreader_textview.recipe` - manifest-only Calibre recipe for debugging an already-prefetched issue.
+- `recipes/telegraph_pressreader.recipe` - existing Telegraph-specific recipe kept for compatibility.
 - `.env.pressreader.example` - credential template; copy it to `.env.pressreader`.
 
 ## Requirements
@@ -31,7 +26,7 @@ Install Python dependencies:
 python3 -m pip install -r requirements.txt
 ```
 
-If you do not already have Chrome available, install Playwright's Chromium browser and pass `--channel chromium` when using the helper directly:
+If you do not already have Chrome available, install Playwright's Chromium browser and pass `--channel chromium`:
 
 ```sh
 python3 -m playwright install chromium
@@ -56,51 +51,105 @@ PRESSREADER_LIBRARY_ID=
 PRESSREADER_LIBRARY_PIN=
 ```
 
-`.env.pressreader` is ignored by Git.
+`.env.pressreader` is ignored by Git. Generated recipes only store paths and metadata, not credential values.
 
-## One-Step Calibre Use
+## Publication References
 
-Run today's Telegraph issue:
+The generic tooling accepts any of these forms:
 
 ```sh
-/Applications/calibre.app/Contents/MacOS/ebook-convert \
-  recipes/telegraph_pressreader.recipe \
-  outputs/telegraph-pressreader-$(date +%Y%m%d).epub
+uk/the-daily-telegraph
+https://www.pressreader.com/uk/the-daily-telegraph
+https://www.pressreader.com/uk/the-daily-telegraph/20260623/textview
+--country uk --publication the-daily-telegraph
 ```
 
-Run a specific issue:
+Dates use PressReader's `YYYYMMDD` issue format. If omitted, the tools use today's date.
+
+## Pull On Demand
+
+Fetch a specific issue and build an EPUB:
+
+```sh
+python3 scripts/pressreader_publication.py fetch uk/the-daily-telegraph \
+  --date 20260623 \
+  --title "The Daily Telegraph" \
+  --ebook-output outputs/telegraph-20260623.epub
+```
+
+Fetch today's issue without converting it:
+
+```sh
+python3 scripts/pressreader_publication.py fetch uk/the-daily-telegraph \
+  --title "The Daily Telegraph" \
+  --out-dir /tmp/pressreader-telegraph
+```
+
+Bootstrap or refresh a library login in a visible browser:
+
+```sh
+python3 scripts/pressreader_publication.py fetch uk/the-daily-telegraph \
+  --title "The Daily Telegraph" \
+  --auth-mode library \
+  --headed \
+  --login-only
+```
+
+Useful fetch options:
+
+- `--date YYYYMMDD` - issue date. Defaults to today.
+- `--auth-mode library|account|manual|none` - authentication flow. Defaults to `library`.
+- `--profile-dir PATH` - persistent browser profile.
+- `--out-dir PATH` - prefetch manifest and article HTML output.
+- `--ebook-output PATH` - optional EPUB/MOBI/AZW3 path built with Calibre.
+- `--limit N` - fetch only a few articles for testing.
+- `--image-scale 200` - inline image quality. `100` is smaller; `300` is larger.
+- `--cover-width 1000` - front-page cover width in pixels.
+- `--debug` - keep rendered page and API debug artefacts.
+- `--dry-run` - print the helper/Calibre commands without running them.
+
+## Generate an Importable Recipe
+
+Create a publication-specific Calibre recipe with defaults baked in:
+
+```sh
+python3 scripts/pressreader_publication.py recipe uk/the-daily-telegraph \
+  --title "The Daily Telegraph" \
+  --output recipes/daily_telegraph_pressreader.recipe
+```
+
+Use the generated recipe:
 
 ```sh
 /Applications/calibre.app/Contents/MacOS/ebook-convert \
-  recipes/telegraph_pressreader.recipe \
-  outputs/telegraph-pressreader-20260623.epub \
+  recipes/daily_telegraph_pressreader.recipe \
+  outputs/telegraph-$(date +%Y%m%d).epub
+```
+
+Run a specific issue with the generated recipe:
+
+```sh
+/Applications/calibre.app/Contents/MacOS/ebook-convert \
+  recipes/daily_telegraph_pressreader.recipe \
+  outputs/telegraph-20260623.epub \
   --recipe-specific-option issue_date:20260623
 ```
 
-Useful recipe-specific options:
-
-- `issue_date:YYYYMMDD` - PressReader issue date. Defaults to today.
-- `env_file:/path/to/.env.pressreader` - credential env file.
-- `profile_dir:/path/to/browser-profile` - persistent browser profile.
-- `out_dir:/tmp/pressreader-telegraph-YYYYMMDD` - prefetch output directory.
-- `image_scale:200` - inline image quality. `100` is smaller; `300` is larger.
-- `cover_width:1000` - front-page cover width in pixels.
-- `limit:3` - fetch only a few articles for testing.
-- `debug:true` - keep rendered page and API debug artefacts.
-
-Example higher image quality:
+You can also use the generic recipe directly. Because Calibre copies recipes into a temp directory while running them, pass `project_dir` unless `PRESSREADER_CALIBRE_PROJECT_DIR` is already set:
 
 ```sh
 /Applications/calibre.app/Contents/MacOS/ebook-convert \
-  recipes/telegraph_pressreader.recipe \
-  outputs/telegraph-pressreader-$(date +%Y%m%d)-hq.epub \
-  --recipe-specific-option image_scale:300 \
-  --recipe-specific-option cover_width:1264
+  recipes/pressreader_publication.recipe \
+  outputs/pressreader-20260623.epub \
+  --recipe-specific-option project_dir:"$(pwd)" \
+  --recipe-specific-option publication_path:uk/the-daily-telegraph \
+  --recipe-specific-option title:"The Daily Telegraph" \
+  --recipe-specific-option issue_date:20260623
 ```
 
 ## Debugging the Prefetch Step
 
-Run the helper directly:
+Run the lower-level helper directly when you need to inspect TextView extraction:
 
 ```sh
 python3 scripts/pressreader_textview_prefetch.py \
@@ -110,6 +159,8 @@ python3 scripts/pressreader_textview_prefetch.py \
   --profile-dir ~/.pressreader-surrey-library-profile \
   --out-dir /tmp/pressreader-telegraph-20260623 \
   --url https://www.pressreader.com/uk/the-daily-telegraph/20260623/textview \
+  --publication-title "The Daily Telegraph" \
+  --issue-date 20260623 \
   --debug
 ```
 
@@ -125,5 +176,5 @@ Then convert the manifest with the manifest-only recipe:
 ## Notes
 
 - This project does not bypass PressReader access controls. It requires a valid PressReader/library session.
-- The helper currently uses PressReader TextView and the authenticated article JSON endpoint. The field mask `4095` is required for paragraph bodies in authorised HotSpot sessions.
-- Generated EPUBs, browser profiles, cookies, and env files are deliberately ignored.
+- The helper uses PressReader TextView and the authenticated article JSON endpoint. The field mask `4095` is required for paragraph bodies in authorised HotSpot sessions.
+- Generated EPUBs, browser profiles, cookies, debug captures, and env files are deliberately ignored.

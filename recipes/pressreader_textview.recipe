@@ -25,7 +25,9 @@ class PressReaderTextView(BasicNewsRecipe):
     category = 'newspaper, pressreader'
     encoding = 'utf-8'
     needs_subscription = 'optional'
+    no_stylesheets = True
     remove_javascript = True
+    remove_attributes = ['style', 'width', 'height']
     remove_empty_feeds = True
     ignore_duplicate_articles = {'url'}
     articles_are_obfuscated = True
@@ -51,11 +53,11 @@ class PressReaderTextView(BasicNewsRecipe):
     }
 
     extra_css = '''
-        body { font-family: serif; line-height: 1.35; }
-        img { display: block; margin: 1em auto; max-width: 100%; height: auto; }
-        .source, .meta { font-size: small; color: #555; }
-        .subtitle { font-weight: bold; }
-    '''
+body { font-family: serif; line-height: 1.35; }
+img { display: block; margin: 1em auto; max-width: 100%; height: auto; }
+.source, .meta { font-size: small; color: #555; }
+.subtitle { font-weight: bold; }
+'''
 
     def __init__(self, options, log, progress_reporter):
         self._early_recipe_options = {}

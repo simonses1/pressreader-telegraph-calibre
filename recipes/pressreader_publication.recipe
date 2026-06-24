@@ -1,0 +1,528 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+'''
+Generic PressReader publication recipe.
+
+This recipe wraps scripts/pressreader_textview_prefetch.py and can be used
+directly with recipe-specific options or copied/generated with defaults for a
+single PressReader publication.
+'''
+
+import json
+import os
+import re
+import subprocess
+import sys
+from collections import OrderedDict
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+
+from calibre.web.feeds.news import BasicNewsRecipe
+
+
+AUTO_PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..')) if '__file__' in globals() else os.getcwd()
+
+# BEGIN PUBLICATION DEFAULTS
+DEFAULT_PUBLICATION_PATH = ''
+DEFAULT_PUBLICATION_TITLE = 'PressReader Publication'
+DEFAULT_PUBLISHER = 'PressReader'
+DEFAULT_CATEGORY = 'newspaper, pressreader'
+DEFAULT_PROJECT_DIR = ''
+DEFAULT_ENV_FILE = '.env.pressreader'
+DEFAULT_PROFILE_DIR = ''
+DEFAULT_AUTH_MODE = 'library'
+DEFAULT_CHANNEL = 'chrome'
+DEFAULT_HEADLESS = 'true'
+DEFAULT_IMAGE_SCALE = '200'
+DEFAULT_COVER_WIDTH = '1000'
+# END PUBLICATION DEFAULTS
+
+DEFAULT_PYTHON = '/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10'
+OPTION_DEFAULTS = {
+    'publication_path': DEFAULT_PUBLICATION_PATH,
+    'title': DEFAULT_PUBLICATION_TITLE,
+    'publisher': DEFAULT_PUBLISHER,
+    'category': DEFAULT_CATEGORY,
+    'env_file': DEFAULT_ENV_FILE,
+    'project_dir': DEFAULT_PROJECT_DIR,
+    'profile_dir': DEFAULT_PROFILE_DIR,
+    'auth_mode': DEFAULT_AUTH_MODE,
+    'headless': DEFAULT_HEADLESS,
+    'channel': DEFAULT_CHANNEL,
+    'image_scale': DEFAULT_IMAGE_SCALE,
+    'cover_width': DEFAULT_COVER_WIDTH,
+    'prefetch_timeout': '900',
+}
+
+
+def slugify(value, fallback='pressreader-publication'):
+    value = re.sub(r'\s+', ' ', value or '').strip()
+    value = re.sub(r'[^a-zA-Z0-9._-]+', '-', value).strip('-').lower()
+    return value[:80] or fallback
+
+
+def title_from_path(publication_path):
+    slug = (publication_path or '').strip('/').split('/')[-1]
+    words = re.split(r'[-_\s]+', slug)
+    small_words = {'and', 'as', 'at', 'but', 'by', 'for', 'in', 'of', 'on', 'or', 'the', 'to', 'via'}
+    rendered = []
+    for index, word in enumerate(words):
+        if not word:
+            continue
+        lower = word.lower()
+        if index and lower in small_words:
+            rendered.append(lower)
+        elif len(word) <= 3 and word.isupper():
+            rendered.append(word)
+        else:
+            rendered.append(lower.capitalize())
+    return ' '.join(rendered) or DEFAULT_PUBLICATION_TITLE
+
+
+def normalise_publication_path(reference, country=''):
+    reference = (reference or '').strip()
+    country = (country or '').strip().strip('/')
+    if not reference:
+        return ''
+
+    if '://' in reference:
+        parsed = urlparse(reference)
+        if not parsed.netloc.endswith('pressreader.com'):
+            raise ValueError(f'Expected a pressreader.com URL, got: {reference}')
+        path = parsed.path
+    else:
+        path = reference
+        path = re.sub(r'^https?://(?:www\.)?pressreader\.com/', '', path)
+        path = re.sub(r'^(?:www\.)?pressreader\.com/', '', path)
+        path = path.split('?', 1)[0].split('#', 1)[0]
+
+    parts = [unquote(part) for part in path.strip('/').split('/') if part]
+    if parts and parts[-1].lower() == 'textview':
+        parts.pop()
+    if parts and re.match(r'^\d{8}$', parts[-1]):
+        parts.pop()
+    if len(parts) == 1 and country:
+        parts.insert(0, country)
+    return '/'.join(parts)
+
+
+class PressReaderPublication(BasicNewsRecipe):
+    title = DEFAULT_PUBLICATION_TITLE
+    __author__ = 'Simon Stace'
+    description = 'PressReader TextView publication with browser-backed authentication.'
+    language = 'en_GB'
+    publisher = DEFAULT_PUBLISHER
+    category = DEFAULT_CATEGORY
+    encoding = 'utf-8'
+    needs_subscription = 'optional'
+    no_stylesheets = True
+    remove_javascript = True
+    remove_attributes = ['style', 'width', 'height']
+    remove_empty_feeds = True
+    ignore_duplicate_articles = {'url'}
+    articles_are_obfuscated = True
+    simultaneous_downloads = 1
+    timeout = 180
+
+    recipe_specific_options = {
+        'manifest': {
+            'short': 'Existing manifest',
+            'long': 'Optional path to an already-prefetched manifest.json.',
+        },
+        'issue_url': {
+            'short': 'Exact issue URL',
+            'long': 'Exact PressReader TextView issue URL. Overrides publication_path and issue_date.',
+        },
+        'url': {
+            'short': 'Alias for issue_url',
+            'long': 'Exact PressReader TextView issue URL. Overrides publication_path and issue_date.',
+        },
+        'publication_url': {
+            'short': 'Publication URL',
+            'long': 'PressReader publication or issue URL. The issue date option is still applied.',
+        },
+        'publication_path': {
+            'short': 'Publication path',
+            'long': 'PressReader path such as uk/the-daily-telegraph.',
+            'default': DEFAULT_PUBLICATION_PATH,
+        },
+        'country': {
+            'short': 'Country/path prefix',
+            'long': 'Country prefix used when publication is just a slug, e.g. uk.',
+        },
+        'publication': {
+            'short': 'Publication slug',
+            'long': 'Publication slug used with country, e.g. the-daily-telegraph.',
+        },
+        'issue_date': {
+            'short': 'Issue date',
+            'long': 'PressReader issue date in YYYYMMDD format. Defaults to today.',
+        },
+        'title': {
+            'short': 'Title',
+            'long': 'Calibre book title.',
+            'default': DEFAULT_PUBLICATION_TITLE,
+        },
+        'publisher': {
+            'short': 'Publisher',
+            'long': 'Calibre publisher metadata.',
+            'default': DEFAULT_PUBLISHER,
+        },
+        'category': {
+            'short': 'Category',
+            'long': 'Calibre tags/category metadata.',
+            'default': DEFAULT_CATEGORY,
+        },
+        'env_file': {
+            'short': 'Credential env file',
+            'long': 'Path to .env.pressreader.',
+            'default': DEFAULT_ENV_FILE,
+        },
+        'project_dir': {
+            'short': 'Project directory',
+            'long': 'Repository root containing scripts/pressreader_textview_prefetch.py.',
+            'default': DEFAULT_PROJECT_DIR,
+        },
+        'profile_dir': {
+            'short': 'Browser profile',
+            'long': 'Persistent Chromium profile directory for PressReader.',
+            'default': DEFAULT_PROFILE_DIR,
+        },
+        'out_dir': {
+            'short': 'Prefetch output directory',
+            'long': 'Directory for helper output. Defaults to /tmp/pressreader-<publication>-YYYYMMDD.',
+        },
+        'helper_script': {
+            'short': 'Prefetch helper script',
+            'long': 'Path to scripts/pressreader_textview_prefetch.py.',
+        },
+        'python': {
+            'short': 'Python executable',
+            'long': 'Python with Playwright installed.',
+        },
+        'auth_mode': {
+            'short': 'Authentication mode',
+            'long': 'library, account, manual, or none. Defaults to library.',
+            'default': DEFAULT_AUTH_MODE,
+        },
+        'headless': {
+            'short': 'Headless browser',
+            'long': 'Set to false for manual login. Defaults to true.',
+            'default': DEFAULT_HEADLESS,
+        },
+        'channel': {
+            'short': 'Browser channel',
+            'long': 'Playwright Chromium channel, e.g. chrome or chromium.',
+            'default': DEFAULT_CHANNEL,
+        },
+        'limit': {
+            'short': 'Article limit',
+            'long': 'Optional article limit for testing. Omit for the full issue.',
+        },
+        'image_scale': {
+            'short': 'Image scale',
+            'long': 'PressReader image scale. Defaults to 200.',
+            'default': DEFAULT_IMAGE_SCALE,
+        },
+        'cover_width': {
+            'short': 'Cover width',
+            'long': 'PressReader front-page cover width in pixels. Defaults to 1000.',
+            'default': DEFAULT_COVER_WIDTH,
+        },
+        'prefetch_timeout': {
+            'short': 'Prefetch timeout',
+            'long': 'Maximum seconds to wait for the browser prefetch helper.',
+            'default': '900',
+        },
+        'debug': {
+            'short': 'Keep debug artefacts',
+            'long': 'Set to 1/true/yes to keep helper debug artefacts.',
+        },
+    }
+
+    conversion_options = {
+        'comment': description,
+        'tags': category,
+        'publisher': publisher,
+        'language': language,
+    }
+
+    extra_css = '''
+body { font-family: serif; line-height: 1.35; }
+img { display: block; margin: 1em auto; max-width: 100%; height: auto; }
+.source, .meta { font-size: small; color: #555; }
+.subtitle { font-weight: bold; }
+'''
+
+    def __init__(self, options, log, progress_reporter):
+        self._early_recipe_options = {}
+        self._manifest_base_dir = ''
+        self._prefetched_articles = {}
+        for raw in (getattr(options, 'recipe_specific_option', None) or ()):
+            key, sep, value = raw.partition(':')
+            if sep:
+                self._early_recipe_options[key] = value
+        BasicNewsRecipe.__init__(self, options, log, progress_reporter)
+        self.conversion_options = dict(self.conversion_options)
+
+    def _option(self, name):
+        value = self._early_recipe_options.get(name)
+        if value is None:
+            value = OPTION_DEFAULTS.get(name)
+        if value is None and isinstance(self.recipe_specific_options, dict):
+            spec = self.recipe_specific_options.get(name)
+            if isinstance(spec, dict):
+                value = spec.get('default')
+        return value
+
+    def _truthy_value(self, value):
+        return (value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+    def _truthy_option(self, name):
+        return self._truthy_value(self._option(name))
+
+    def _issue_date(self):
+        value = (self._option('issue_date') or '').strip()
+        if value:
+            if len(value) != 8 or not value.isdigit():
+                raise ValueError(f'PressReader issue_date must be YYYYMMDD, got: {value}')
+            return value
+        return datetime.now().strftime('%Y%m%d')
+
+    def _project_dir(self):
+        configured = self._option('project_dir') or os.environ.get('PRESSREADER_CALIBRE_PROJECT_DIR')
+        candidates = []
+        if configured:
+            candidates.append(configured)
+        if DEFAULT_PROJECT_DIR:
+            candidates.append(DEFAULT_PROJECT_DIR)
+        if '__file__' in globals():
+            try:
+                candidates.append(str(Path(__file__).resolve().parent.parent))
+            except Exception:
+                pass
+        candidates.extend([os.getcwd(), AUTO_PROJECT_DIR])
+        for candidate in candidates:
+            if candidate and os.path.exists(os.path.join(candidate, 'scripts', 'pressreader_textview_prefetch.py')):
+                return os.path.abspath(os.path.expanduser(candidate))
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
+        if DEFAULT_PROJECT_DIR:
+            return os.path.abspath(os.path.expanduser(DEFAULT_PROJECT_DIR))
+        return AUTO_PROJECT_DIR
+
+    def _default_path(self, option_name, *parts):
+        value = self._option(option_name)
+        if value:
+            path = os.path.expanduser(value)
+            if os.path.isabs(path):
+                return os.path.abspath(path)
+            return os.path.abspath(os.path.join(self._project_dir(), path))
+        return os.path.join(self._project_dir(), *parts)
+
+    def _python_executable(self):
+        value = self._option('python') or os.environ.get('PRESSREADER_PYTHON') or DEFAULT_PYTHON
+        value = os.path.expanduser(value)
+        if os.path.exists(value):
+            return value
+        return sys.executable or 'python3'
+
+    def _publication_path(self):
+        reference = (
+            self._option('publication_path')
+            or self._option('publication_url')
+            or self._option('publication')
+            or ''
+        )
+        path = normalise_publication_path(reference, self._option('country') or '')
+        if not path:
+            raise ValueError(
+                'PressReader publication_path is required, e.g. '
+                '--recipe-specific-option publication_path:uk/the-daily-telegraph'
+            )
+        return path
+
+    def _publication_slug(self):
+        return slugify(self._publication_path().split('/')[-1])
+
+    def _metadata_title(self):
+        return (self._option('title') or self.title or title_from_path(self._publication_path())).strip()
+
+    def _metadata_publisher(self):
+        return (self._option('publisher') or self.publisher or 'PressReader').strip()
+
+    def _metadata_category(self):
+        return (self._option('category') or self.category or 'newspaper, pressreader').strip()
+
+    def _issue_url(self):
+        exact = (self._option('issue_url') or self._option('url') or '').strip()
+        if exact:
+            return exact
+        quoted_path = '/'.join(quote(part, safe='') for part in self._publication_path().split('/') if part)
+        return f'https://www.pressreader.com/{quoted_path}/{self._issue_date()}/textview'
+
+    def _manifest_path(self):
+        value = self._option('manifest')
+        if value:
+            path = os.path.abspath(os.path.expanduser(value))
+            if not os.path.exists(path):
+                raise ValueError(f'PressReader manifest does not exist: {path}')
+            return path
+        return self._run_prefetch()
+
+    def _run_prefetch(self):
+        issue_date = self._issue_date()
+        helper = self._default_path('helper_script', 'scripts', 'pressreader_textview_prefetch.py')
+        env_file = self._default_path('env_file', '.env.pressreader')
+        profile_dir = os.path.abspath(os.path.expanduser(
+            self._option('profile_dir') or f'~/.pressreader-{self._publication_slug()}-profile'
+        ))
+        out_dir = os.path.abspath(os.path.expanduser(
+            self._option('out_dir') or f'/tmp/pressreader-{self._publication_slug()}-{issue_date}'
+        ))
+        auth_mode = (self._option('auth_mode') or DEFAULT_AUTH_MODE or 'library').strip().lower()
+
+        if not os.path.exists(helper):
+            raise ValueError(f'PressReader helper script does not exist: {helper}')
+        if auth_mode in {'library', 'account'} and not os.path.exists(env_file):
+            raise ValueError(f'PressReader env file does not exist: {env_file}')
+        if auth_mode == 'manual' and self._truthy_option('headless'):
+            raise ValueError('PressReader auth_mode:manual requires headless:false')
+
+        cmd = [
+            self._python_executable(),
+            helper,
+            '--env-file', env_file,
+            '--profile-dir', profile_dir,
+            '--out-dir', out_dir,
+            '--url', self._issue_url(),
+            '--channel', (self._option('channel') or DEFAULT_CHANNEL or 'chrome').strip(),
+            '--publication-title', self._metadata_title(),
+            '--publisher', self._metadata_publisher(),
+            '--category', self._metadata_category(),
+            '--issue-date', issue_date,
+        ]
+        if self._truthy_option('headless'):
+            cmd.append('--headless')
+        if auth_mode == 'library':
+            cmd.append('--library-login')
+        elif auth_mode == 'account':
+            cmd.append('--auto-login')
+        elif auth_mode == 'manual':
+            cmd.append('--login')
+        elif auth_mode != 'none':
+            raise ValueError(f'PressReader auth_mode must be library, account, manual, or none; got: {auth_mode}')
+
+        limit = (self._option('limit') or '').strip()
+        if limit:
+            cmd.extend(['--limit', limit])
+        image_scale = (self._option('image_scale') or DEFAULT_IMAGE_SCALE or '200').strip()
+        if image_scale:
+            if not image_scale.isdigit():
+                raise ValueError(f'PressReader image_scale must be numeric, got: {image_scale}')
+            cmd.extend(['--image-scale', image_scale])
+        cover_width = (self._option('cover_width') or DEFAULT_COVER_WIDTH or '1000').strip()
+        if cover_width:
+            if not cover_width.isdigit():
+                raise ValueError(f'PressReader cover_width must be numeric, got: {cover_width}')
+            cmd.extend(['--cover-width', cover_width])
+        if self._truthy_option('debug'):
+            cmd.append('--debug')
+
+        self.log('Running PressReader prefetch for', self._metadata_title(), issue_date)
+        proc_env = dict(os.environ)
+        proc_env.setdefault('PYTHONIOENCODING', 'utf-8')
+        timeout = int((self._option('prefetch_timeout') or '900').strip())
+        completed = subprocess.run(
+            cmd,
+            cwd=self._project_dir(),
+            env=proc_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+        for line in (completed.stderr or '').splitlines():
+            self.log('PressReader:', line)
+        if completed.returncode:
+            raise ValueError(
+                'PressReader prefetch failed with exit code %s. Last output: %s'
+                % (completed.returncode, (completed.stderr or completed.stdout or '').splitlines()[-8:])
+            )
+
+        manifest = os.path.join(out_dir, 'manifest.json')
+        for line in reversed((completed.stdout or '').splitlines()):
+            if line.strip().endswith('manifest.json'):
+                manifest = line.strip()
+                break
+        if not os.path.exists(manifest):
+            raise ValueError(f'PressReader prefetch completed but manifest was not found: {manifest}')
+        return os.path.abspath(manifest)
+
+    def _load_manifest(self):
+        manifest_path = self._manifest_path()
+        self._manifest_base_dir = os.path.dirname(manifest_path)
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        articles = manifest.get('articles') if isinstance(manifest, dict) else manifest
+        if not isinstance(articles, list):
+            raise ValueError('PressReader manifest must contain an articles list')
+        if not articles:
+            raise ValueError(f'PressReader manifest contained no articles: {manifest_path}')
+
+        cover_url = manifest.get('cover_url') or manifest.get('cover') if isinstance(manifest, dict) else ''
+        if cover_url:
+            self.cover_url = cover_url
+            self._prefetched_cover_url = cover_url
+            self.log('Using PressReader front-page cover:', cover_url)
+        if isinstance(manifest, dict):
+            self.title = manifest.get('title') or self._metadata_title()
+            self.publisher = manifest.get('publisher') or self._metadata_publisher()
+            self.category = manifest.get('category') or self._metadata_category()
+            self.conversion_options.update({
+                'comment': self.description,
+                'tags': self.category,
+                'publisher': self.publisher,
+                'language': self.language,
+            })
+        self.log('Using PressReader manifest', manifest_path)
+        return articles
+
+    def parse_index(self):
+        articles = self._load_manifest()
+        feeds = OrderedDict()
+        for index, article in enumerate(articles, 1):
+            if not isinstance(article, dict):
+                continue
+            title = (article.get('title') or f'Article {index}').strip()
+            html_path = article.get('html') or ''
+            if html_path and not os.path.isabs(html_path):
+                html_path = os.path.join(self._manifest_base_dir, html_path)
+            if not html_path or not os.path.exists(html_path):
+                raise ValueError(f'PressReader article HTML does not exist for {title}: {html_path}')
+            url = article.get('url') or f'pressreader-prefetched://article/{index}'
+            section = (article.get('section') or 'Articles').strip() or 'Articles'
+            cached = dict(article)
+            cached['html_path'] = html_path
+            self._prefetched_articles[url] = cached
+            feeds.setdefault(section, []).append({'title': title, 'url': url})
+        if not feeds:
+            raise ValueError('PressReader manifest contained no usable articles')
+        self.log('Loaded', sum(len(x) for x in feeds.values()), 'PressReader articles from manifest')
+        return list(feeds.items())
+
+    def get_obfuscated_article(self, url):
+        article = self._prefetched_articles.get(url)
+        if not article:
+            raise ValueError(f'PressReader manifest article was not cached: {url}')
+        html_path = article['html_path']
+        with open(html_path, 'rb') as f:
+            data = f.read()
+        return {
+            'data': data,
+            'url': article.get('base_url') or Path(html_path).resolve().as_uri(),
+        }
+
+    def get_cover_url(self):
+        return getattr(self, '_prefetched_cover_url', None) or getattr(self, 'cover_url', None)
