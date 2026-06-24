@@ -1,8 +1,8 @@
-# PressReader Calibre Tools
+# PressReader Calibre
 
-Browser-backed tools for building Calibre/Kindle editions from PressReader TextView publications.
+Generic browser-backed tooling for building Calibre/Kindle editions from PressReader TextView publications.
 
-The code is now publication-aware: pass a PressReader publication path, issue URL, or country/slug pair, then either fetch an issue on demand or generate an importable Calibre recipe for repeated use.
+This repository is publication-aware rather than Telegraph-specific. Pass any PressReader publication path, issue URL, or country/slug pair, then either fetch an issue on demand or generate an importable Calibre recipe for repeated use. The Telegraph examples are kept because they are the original use case and a useful known-good fixture.
 
 ## Files
 
@@ -10,7 +10,7 @@ The code is now publication-aware: pass a PressReader publication path, issue UR
 - `recipes/pressreader_publication.recipe` - generic Calibre recipe for any PressReader publication.
 - `scripts/pressreader_textview_prefetch.py` - Playwright helper that handles PressReader sign-in and TextView export.
 - `recipes/pressreader_textview.recipe` - manifest-only Calibre recipe for debugging an already-prefetched issue.
-- `recipes/telegraph_pressreader.recipe` - existing Telegraph-specific recipe kept for compatibility.
+- `recipes/telegraph_pressreader.recipe` - legacy Telegraph-specific recipe kept for compatibility.
 - `.env.pressreader.example` - credential template; copy it to `.env.pressreader`.
 
 ## Requirements
@@ -65,6 +65,8 @@ https://www.pressreader.com/uk/the-daily-telegraph/20260623/textview
 ```
 
 Dates use PressReader's `YYYYMMDD` issue format. If omitted, the tools use today's date.
+
+The examples below use The Daily Telegraph, but the same commands work for any PressReader publication path that your account or library session can access.
 
 ## Pull On Demand
 
